@@ -1,0 +1,73 @@
+#cloud-config
+
+bootcmd:
+- docker pull google/cloud-sdk:272.0.0-alpine
+- docker pull mongo:4.0.11-xenial
+
+runcmd:
+# Move to home to write files and download bucket in the folder
+- cd /home
+
+# List all the buckets of the project searching a bucket named mongo-environment and save their location in a .txt
+- docker run
+  --rm
+  --volume $PWD:$PWD
+  --workdir $PWD
+  google/cloud-sdk:272.0.0-alpine gsutil ls | grep mongo-environment | cut -c6- | sed -e "s/\r//g" > bucket-location.txt
+
+# With the bucket-location obtain the complete url and the location of the object
+- docker run
+  --rm
+  --volume $PWD:$PWD
+  --workdir $PWD
+  google/cloud-sdk:272.0.0-alpine gsutil ls gs://$(cat bucket-location.txt) | cut -c6- | sed -e "s/\r//g" > object-location.txt
+
+# Download the bucket object with the mongo credentials encrypted
+- docker run
+  --rm
+  --volume $PWD:$PWD
+  --workdir $PWD
+  google/cloud-sdk:272.0.0-alpine
+  gsutil cp gs://$(cat object-location.txt) .
+
+# Get the file name
+- cat object-location.txt | cut -d "/" -f2 > object-name.txt
+
+# Using KMS decrypt for decrypt the secrets file into a file named variables.dec
+- docker run
+  --rm
+  --volume $PWD:$PWD
+  --workdir $PWD
+  google/cloud-sdk:272.0.0-alpine gcloud kms decrypt
+  --location europe-west1
+  --keyring traceability-keyring
+  --key mongo
+  --plaintext-file variables.dec
+  --ciphertext-file $(cat object-name.txt)
+
+# Export the environment variables from the file to the system
+- source ./variables.dec
+
+
+# MONGO RUN
+
+# Create mongo network
+- docker network create mongodb-network
+
+# Run mongo container with the necessary configuration and credentials
+- docker run
+  --detach
+  --network mongodb-network
+  --name mongodb-container
+  --volume /home/mongodb/data:/data/db
+  --publish 27017:27017
+  --restart always
+  --env MONGO_INITDB_ROOT_USERNAME=$MONGO_USER
+  --env MONGO_INITDB_ROOT_PASSWORD=$MONGO_PASSWORD
+  mongo:4.0.11-xenial
+
+# Delete the environment variables, object name and the file decrypted.
+- rm $(cat object-name.txt)
+  && rm variables.dec
+  && unset MONGO_USER
+  && unset MONGO_PASSWORD
